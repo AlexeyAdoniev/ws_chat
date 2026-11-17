@@ -4,9 +4,7 @@
   "private": true,
   "type": "module",
   "packageManager": "yarn@1.22.22",
-  "engines": {
-    "node": "24.x"
-  },
+
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js"

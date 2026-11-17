@@ -1,8 +1,8 @@
 # Web Socket Chat
 
-Local prototype environment: Node.js 24 with Yarn, nginx, two Cassandra 5.0 nodes, Redis 8, and Elasticsearch.
+A study backend using Node.js 24, `ws`, and `cassandra-driver`. Cassandra stores participants, chats, membership, and messages. A process-local `Map<participantId, Set<WebSocket>>` tracks authenticated connections, including multiple connections per user.
 
-Requires Docker Engine with Docker Compose v2. Allow roughly 6 GB of memory for the stack; Cassandra startup can take several minutes.
+## Run
 
 ```sh
 cp .env.example .env
@@ -10,41 +10,81 @@ docker compose up --build -d --wait --wait-timeout 600
 curl http://localhost:8080/health
 ```
 
-The health endpoint returns `{"status":"ok"}`. It checks the placeholder HTTP server only; database clients and chat features are not implemented yet. nginx forwards HTTP and supports future WebSocket upgrades. The app receives database connection settings through its environment.
+Compose starts two Cassandra nodes, initializes the `ws_chat` keyspace with replication factor 2, then starts the app and nginx. Cassandra startup can take several minutes. Redis and Elasticsearch are commented out and are not used by the backend.
 
-| Service | Host address | Address inside Compose |
+The app creates its tables and indexes before listening. Startup inserts three demo users, one chat, and one membership if absent, and prints them, including demo credentials:
+
+| Participant ID / name | Password | Initial chat |
 | --- | --- | --- |
-| HTTP through nginx | localhost:8080 | app:3000 |
-| Cassandra node 1 | localhost:9042 | cassandra-1:9042 |
-| Cassandra node 2 | localhost:9043 | cassandra-2:9042 |
-| Redis | localhost:6379 | redis:6379 |
-| Elasticsearch | localhost:9200 | elasticsearch:9200 |
+| alice | alice-password | general |
+| bob | bob-password | |
+| carol | carol-password | |
 
-Configure host ports and database settings in `.env`. The two Cassandra nodes share a cluster and datacenter. Inspect membership with:
+The chat has ID `general` and name `General`. Passwords are stored as scrypt hashes. Existing users, chats, messages, and other memberships survive restarts; startup restores Alice's seeded membership if it was removed.
 
-```sh
-docker compose exec cassandra-1 nodetool status
+Connect to `ws://localhost:8080/` through nginx, or `ws://localhost:3000/` when running Node locally. `/health` reports that the HTTP server is running; it does not probe Cassandra on each request.
+
+## WebSocket API
+
+Every message is JSON with `type` and `payload` fields. Login first:
+
+```json
+{"type":"login","payload":{"name":"alice","password":"alice-password"}}
 ```
 
-Expect two nodes marked `UN` once both have joined. This environment uses unauthenticated databases, including Elasticsearch with security disabled, and binds published ports to localhost. It is intended for local development.
+Successful login returns:
 
-Elasticsearch may require increasing the Docker host's `vm.max_map_count` if its logs report a bootstrap check failure. See the [official Docker setup instructions](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-prod).
-
-```sh
-docker compose ps
-docker compose logs -f
-docker compose down
+```json
+{"type":"login","payload":{"id":"alice","name":"alice"}}
 ```
 
-The `cassandra-init` service creates the `ws_chat` keyspace after both Cassandra nodes are healthy, using `NetworkTopologyStrategy` and replication factor 2 in `CASSANDRA_DC` (default: `datacenter1`). It exits after initialization and preserves an existing keyspace's configuration.
+Login also sends a `messageUpdates` event with stored history for each joined chat, in ascending message order. Add or remove a participant using an authenticated chat member's connection:
 
-Named volumes retain database data across restarts. `docker compose down -v` deletes that data.
+```json
+{"type":"modifyParticipants","payload":{"action":"add","participantId":"bob","chatId":"general"}}
+{"type":"modifyParticipants","payload":{"action":"remove","participantId":"bob","chatId":"general"}}
+```
 
-To run only the placeholder server locally with Node.js 24 and Yarn 1.22.22:
+The caller receives a `modifyParticipants` acknowledgement with the same payload. Added participants' authenticated sockets receive the chat history. There are no `participantsUpdates` events.
+
+Send a message as a chat member:
+
+```json
+{"type":"sendMessage","payload":{"content":"Hello!","chatId":"general"}}
+```
+
+The server gets the chat's participants, saves the message in Cassandra, then broadcasts to those participants' authenticated sockets, including the sender:
+
+```json
+{
+  "type": "messageUpdates",
+  "payload": {
+    "chatId": "general",
+    "messages": [
+      {
+        "id": "<timeuuid>",
+        "content": "Hello!",
+        "participantId": "alice",
+        "createdAt": "2026-11-17T10:00:00.000Z"
+      }
+    ]
+  }
+}
+```
+
+Failures return `{"type":"error","payload":{"message":"..."}}`. Login and membership are enforced; request payload validation is omitted for this study project.
+
+Operations are serialized within one server process so concurrent sends persist and broadcast in the same order. Messages are partitioned by chat and clustered by ascending time UUID. Membership is partitioned by participant, with a secondary index on chat ID. Disconnecting removes the socket from the map. This implementation runs as one app instance; socket routing and ordering are process-local.
+
+## Run Node locally
+
+Use an existing Cassandra keyspace, or start the database services separately. Node startup creates tables but expects the keyspace to exist.
 
 ```sh
 yarn install --frozen-lockfile
-yarn dev
+CASSANDRA_CONTACT_POINTS=127.0.0.1 CASSANDRA_LOCAL_DATACENTER=datacenter1 CASSANDRA_KEYSPACE=ws_chat yarn dev
 ```
 
-The local server listens on port 3000 by default; override it with `PORT`.
+Connection defaults are shown above. `PORT` defaults to `3000`. Compose supplies its own database hostnames. Host port and cluster settings are documented in `.env.example`.
+
+Named Docker volumes retain database data across restarts. `docker compose down -v` deletes that data.
