@@ -27,6 +27,9 @@ services:
       CASSANDRA_KEYSPACE: ws_chat
       REDIS_URL: redis://redis:6379
       ELASTICSEARCH_URL: http://elasticsearch:9200
+    depends_on:
+      cassandra-init:
+        condition: service_completed_successfully
     expose:
       - '3000'
     healthcheck:
