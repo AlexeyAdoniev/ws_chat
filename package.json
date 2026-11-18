@@ -7,6 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/main.js",
+    "test": "yarn build && node dist/test.js",
     "dev": "node --watch --watch-path=src --watch-preserve-output -e \"require('node:child_process').execSync('yarn build', { stdio: 'inherit' }); require('./dist/main.js');\""
   },
   "dependencies": {
